@@ -23,11 +23,6 @@ from scp import SCPClient
 from tqdm import tqdm
 import traceback
 
-IS_PY2 = sys.version_info[0] < 3
-if IS_PY2:
-    reload(sys)
-    sys.setdefaultencoding('utf8')
-
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
 DUMP_JS = os.path.join(script_dir, 'dump.js')
@@ -38,9 +33,8 @@ Host = 'localhost'
 Port = 2222
 KeyFileName = None
 
-TEMP_DIR = tempfile.gettempdir()
-PAYLOAD_DIR = 'Payload'
-PAYLOAD_PATH = os.path.join(TEMP_DIR, PAYLOAD_DIR)
+temp_dir = ''
+payload_path = ''
 file_dict = {}
 
 finished = threading.Event()
@@ -84,11 +78,12 @@ def generate_ipa(path, display_name):
             to_dir = os.path.join(path, app_name, value)
             if key != 'app':
                 shutil.move(from_dir, to_dir)
-
-        target_dir = './' + PAYLOAD_DIR
+        ipa_payload_path = os.path.join(temp_dir, 'Payload')
+        os.rename(payload_path, ipa_payload_path)
+        target_dir = './Payload'
         zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
-        subprocess.check_call(zip_args, cwd=TEMP_DIR)
-        shutil.rmtree(PAYLOAD_PATH)
+        subprocess.check_call(zip_args, cwd=temp_dir)
+        clear_tmp_folder('Payload')
     except Exception as e:
         print(e)
         finished.set()
@@ -99,7 +94,7 @@ def on_message(message, data):
 
     def progress(filename, size, sent):
         baseName = os.path.basename(filename)
-        if IS_PY2 or isinstance(baseName, bytes):
+        if isinstance(baseName, bytes):
             t.desc = baseName.decode("utf-8")
         else:
             t.desc = baseName
@@ -114,12 +109,12 @@ def on_message(message, data):
             dump_path = payload['dump']
 
             scp_from = dump_path
-            scp_to = PAYLOAD_PATH + '/'
+            scp_to = payload_path + '/'
 
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to)
 
-            chmod_dir = os.path.join(PAYLOAD_PATH, os.path.basename(dump_path))
+            chmod_dir = os.path.join(payload_path, os.path.basename(dump_path))
             chmod_args = ('chmod', '655', chmod_dir)
             try:
                 subprocess.check_call(chmod_args)
@@ -133,11 +128,11 @@ def on_message(message, data):
             app_path = payload['app']
 
             scp_from = app_path
-            scp_to = PAYLOAD_PATH + '/'
+            scp_to = payload_path + '/'
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to, recursive=True)
 
-            chmod_dir = os.path.join(PAYLOAD_PATH, os.path.basename(app_path))
+            chmod_dir = os.path.join(payload_path, os.path.basename(app_path))
             chmod_args = ('chmod', '755', chmod_dir)
             try:
                 subprocess.check_call(chmod_args)
@@ -277,22 +272,37 @@ def open_target_app(device, name_or_bundleid):
 
 
 def start_dump(session, ipa_name):
-    print('Dumping {} to {}'.format(display_name, TEMP_DIR))
+    print('Dumping {} to {}'.format(display_name, payload_path))
 
     script = load_js_file(session, DUMP_JS)
     script.post('dump')
     finished.wait()
 
-    generate_ipa(PAYLOAD_PATH, ipa_name)
+    generate_ipa(payload_path, ipa_name)
 
-    if session:
-        session.detach()
+    finished.clear()
+    file_dict.clear()
 
+def identifier_filter(identifier):
+    if 'apple' in identifier:
+        return False
+    if 'com.saurik.Cydia' == identifier:
+        return False
+    if 'com.ex.substitute.settings' == identifier:
+        return False
+    if 'unc0ver' in identifier:
+        return False
+    if 'rn.notes.best' == identifier:
+        return False
+    return True
+
+def clear_tmp_folder(folder_name):
+    shutil.rmtree(os.path.join(temp_dir, folder_name))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='frida-ios-dump (by AloneMonkey v2.0)')
     parser.add_argument('-l', '--list', dest='list_applications', action='store_true', help='List the installed apps')
-    parser.add_argument('-o', '--output', dest='output_ipa', help='Specify name of the decrypted IPA')
+    parser.add_argument('-3', '--third_party', dest='third_party', action='store_true', help='Dump all third-party apps')
     parser.add_argument('-H', '--host', dest='ssh_host', help='Specify SSH hostname')
     parser.add_argument('-p', '--port', dest='ssh_port', help='Specify SSH port')
     parser.add_argument('-u', '--user', dest='ssh_user', help='Specify SSH username')
@@ -314,8 +324,14 @@ if __name__ == '__main__':
     if args.list_applications:
         list_applications(device)
     else:
-        name_or_bundleid = args.target
-        output_ipa = args.output_ipa
+        if args.third_party:
+            applications = get_applications(device)
+            name_or_bundleid_list = []
+            for application in applications:
+                if identifier_filter(application.identifier):
+                    name_or_bundleid_list.append(application.identifier)
+        else:
+            name_or_bundleid_list = [ args.target ]
         # update ssh args
         if args.ssh_host:
             Host = args.ssh_host
@@ -333,13 +349,16 @@ if __name__ == '__main__':
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(Host, port=Port, username=User, password=Password, key_filename=KeyFileName)
 
-            create_dir(PAYLOAD_PATH)
-            (session, display_name, bundle_identifier) = open_target_app(device, name_or_bundleid)
-            if output_ipa is None:
-                output_ipa = display_name
-            output_ipa = re.sub('\.ipa$', '', output_ipa)
-            if session:
-                start_dump(session, output_ipa)
+            for name_or_bundleid in name_or_bundleid_list:
+                temp_dir = tempfile.gettempdir()
+                payload_path = os.path.join(temp_dir, name_or_bundleid)
+                create_dir(payload_path)
+                (session, display_name, bundle_identifier) = open_target_app(device, name_or_bundleid)
+                output_ipa = re.sub('\.ipa$', '', display_name)
+                if session:
+                    start_dump(session, output_ipa)
+                    session.detach()
+                    
         except paramiko.ssh_exception.NoValidConnectionsError as e:
             print(e)
             print('Try specifying -H/--hostname and/or -p/--port')
@@ -355,8 +374,5 @@ if __name__ == '__main__':
 
     if ssh:
         ssh.close()
-
-    if os.path.exists(PAYLOAD_PATH):
-        shutil.rmtree(PAYLOAD_PATH)
 
     sys.exit(exit_code)
