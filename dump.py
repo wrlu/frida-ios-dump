@@ -22,6 +22,7 @@ from paramiko import SSHClient
 from scp import SCPClient
 from tqdm import tqdm
 import traceback
+import platform
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
@@ -30,7 +31,7 @@ DUMP_JS = os.path.join(script_dir, 'dump.js')
 User = 'root'
 Password = 'alpine'
 Host = 'localhost'
-Port = 2222
+Port = 22
 KeyFileName = None
 
 temp_dir = ''
@@ -81,7 +82,11 @@ def generate_ipa(path, display_name):
         ipa_payload_path = os.path.join(temp_dir, 'Payload')
         os.rename(payload_path, ipa_payload_path)
         target_dir = './Payload'
-        zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
+        
+        if platform.system() == 'Windows':
+            zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
+        else:
+            zip_args = ('7z', '-tzip', os.path.join(os.getcwd(), ipa_filename), target_dir)
         subprocess.check_call(zip_args, cwd=temp_dir)
         clear_tmp_folder('Payload')
     except Exception as e:
@@ -114,12 +119,13 @@ def on_message(message, data):
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to)
 
-            chmod_dir = os.path.join(payload_path, os.path.basename(dump_path))
-            chmod_args = ('chmod', '655', chmod_dir)
-            try:
-                subprocess.check_call(chmod_args)
-            except subprocess.CalledProcessError as err:
-                print(err)
+            if platform.system() != 'Windows':
+                chmod_dir = os.path.join(payload_path, os.path.basename(dump_path))
+                chmod_args = ('chmod', '655', chmod_dir)
+                try:
+                    subprocess.check_call(chmod_args)
+                except subprocess.CalledProcessError as err:
+                    print(err)
 
             index = origin_path.find('.app/')
             file_dict[os.path.basename(dump_path)] = origin_path[index + 5:]
@@ -132,12 +138,13 @@ def on_message(message, data):
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to, recursive=True)
 
-            chmod_dir = os.path.join(payload_path, os.path.basename(app_path))
-            chmod_args = ('chmod', '755', chmod_dir)
-            try:
-                subprocess.check_call(chmod_args)
-            except subprocess.CalledProcessError as err:
-                print(err)
+            if platform.system() != 'Windows':
+                chmod_dir = os.path.join(payload_path, os.path.basename(app_path))
+                chmod_args = ('chmod', '755', chmod_dir)
+                try:
+                    subprocess.check_call(chmod_args)
+                except subprocess.CalledProcessError as err:
+                    print(err)
 
             file_dict['app'] = os.path.basename(app_path)
 
