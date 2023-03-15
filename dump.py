@@ -23,6 +23,7 @@ from scp import SCPClient
 from tqdm import tqdm
 import traceback
 import platform
+import stat
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
@@ -33,6 +34,7 @@ Password = 'alpine'
 Host = 'localhost'
 Port = 22
 KeyFileName = None
+output_folder = os.getcwd()
 
 temp_dir = ''
 payload_path = ''
@@ -71,27 +73,19 @@ def generate_ipa(path, display_name):
     ipa_filename = display_name + '.ipa'
 
     print('Generating "{}"'.format(ipa_filename))
-    try:
-        app_name = file_dict['app']
+    app_name = file_dict['app']
 
-        for key, value in file_dict.items():
-            from_dir = os.path.join(path, key)
-            to_dir = os.path.join(path, app_name, value)
-            if key != 'app':
-                shutil.move(from_dir, to_dir)
-        ipa_payload_path = os.path.join(temp_dir, 'Payload')
-        os.rename(payload_path, ipa_payload_path)
-        target_dir = './Payload'
-        
-        if platform.system() == 'Windows':
-            zip_args = ('zip', '-qr', os.path.join(os.getcwd(), ipa_filename), target_dir)
-        else:
-            zip_args = ('7z', '-tzip', os.path.join(os.getcwd(), ipa_filename), target_dir)
-        subprocess.check_call(zip_args, cwd=temp_dir)
-        clear_tmp_folder('Payload')
-    except Exception as e:
-        print(e)
-        finished.set()
+    for key, value in file_dict.items():
+        from_dir = os.path.join(path, key)
+        to_dir = os.path.join(path, app_name, value)
+        if key != 'app':
+            shutil.move(from_dir, to_dir)
+    if platform.system() == 'Windows':
+        zip_args = ('7z.exe', 'a', '-tzip', os.path.join(output_folder, ipa_filename), payload_path)
+    else:
+        zip_args = ('zip', '-qr', os.path.join(output_folder, ipa_filename), payload_path)
+    print(zip_args)
+    subprocess.check_call(zip_args)
 
 def on_message(message, data):
     t = tqdm(unit='B',unit_scale=True,unit_divisor=1024,miniters=1)
@@ -119,13 +113,8 @@ def on_message(message, data):
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to)
 
-            if platform.system() != 'Windows':
-                chmod_dir = os.path.join(payload_path, os.path.basename(dump_path))
-                chmod_args = ('chmod', '655', chmod_dir)
-                try:
-                    subprocess.check_call(chmod_args)
-                except subprocess.CalledProcessError as err:
-                    print(err)
+            chmod_dir = os.path.join(payload_path, os.path.basename(dump_path))
+            os.chmod(chmod_dir, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
 
             index = origin_path.find('.app/')
             file_dict[os.path.basename(dump_path)] = origin_path[index + 5:]
@@ -138,13 +127,8 @@ def on_message(message, data):
             with SCPClient(ssh.get_transport(), progress = progress, socket_timeout = 60) as scp:
                 scp.get(scp_from, scp_to, recursive=True)
 
-            if platform.system() != 'Windows':
-                chmod_dir = os.path.join(payload_path, os.path.basename(app_path))
-                chmod_args = ('chmod', '755', chmod_dir)
-                try:
-                    subprocess.check_call(chmod_args)
-                except subprocess.CalledProcessError as err:
-                    print(err)
+            chmod_dir = os.path.join(payload_path, os.path.basename(app_path))
+            os.chmod(chmod_dir, stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
 
             file_dict['app'] = os.path.basename(app_path)
 
@@ -244,8 +228,6 @@ def load_js_file(session, filename):
 def create_dir(path):
     path = path.strip()
     path = path.rstrip('\\')
-    if os.path.exists(path):
-        shutil.rmtree(path)
     try:
         os.makedirs(path)
     except os.error as err:
@@ -299,12 +281,8 @@ def identifier_filter(identifier):
         return False
     if 'unc0ver' in identifier:
         return False
-    if 'rn.notes.best' == identifier:
-        return False
     return True
 
-def clear_tmp_folder(folder_name):
-    shutil.rmtree(os.path.join(temp_dir, folder_name))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='frida-ios-dump (by AloneMonkey v2.0)')
@@ -315,7 +293,9 @@ if __name__ == '__main__':
     parser.add_argument('-u', '--user', dest='ssh_user', help='Specify SSH username')
     parser.add_argument('-P', '--password', dest='ssh_password', help='Specify SSH password')
     parser.add_argument('-K', '--key_filename', dest='ssh_key_filename', help='Specify SSH private key file path')
+    parser.add_argument('-o', dest='output_folder', help='Output folder')
     parser.add_argument('target', nargs='?', help='Bundle identifier or display name of the target app')
+    
 
     args = parser.parse_args()
 
@@ -350,6 +330,8 @@ if __name__ == '__main__':
             Password = args.ssh_password
         if args.ssh_key_filename:
             KeyFileName = args.ssh_key_filename
+        if args.output_folder:
+            output_folder = os.path.abspath(args.output_folder)
 
         try:
             ssh = paramiko.SSHClient()
@@ -358,7 +340,9 @@ if __name__ == '__main__':
 
             for name_or_bundleid in name_or_bundleid_list:
                 temp_dir = tempfile.gettempdir()
-                payload_path = os.path.join(temp_dir, name_or_bundleid)
+                base_path = os.path.join(temp_dir, name_or_bundleid)
+                create_dir(base_path)
+                payload_path = os.path.join(base_path, 'Payload')
                 create_dir(payload_path)
                 (session, display_name, bundle_identifier) = open_target_app(device, name_or_bundleid)
                 output_ipa = re.sub('\.ipa$', '', display_name)
